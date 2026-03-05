@@ -1,4 +1,3 @@
-
 #include <AFMotor.h>
 #include <SoftwareSerial.h>
 #include <NewPing.h>
@@ -9,28 +8,33 @@ SoftwareSerial BT(10, 11); // HC-05: RX=10, TX=11
 // ================== IR line sensors ==================
 #define IR_LEFT   A0
 #define IR_RIGHT  A1
-// Nếu module IR  trả ngược (đen=1, trắng=0) thì đảo điều kiện trong autoStep()
 
-// ================== HC-SR04 (cố định phía trước) ==================
+// ================== HC-SR04 ==================
 #define TRIGGER_PIN  A2
 #define ECHO_PIN     A3
-#define MAX_DISTANCE 50      // đo tối đa 50cm
-#define STOP_DISTANCE 5      // dừng khi vật ≤ 5cm
+#define MAX_DISTANCE 50
+#define STOP_DISTANCE 5
 
 NewPing sonar(TRIGGER_PIN, ECHO_PIN, MAX_DISTANCE);
 
-// ================== Motors (Adafruit Motor Shield) ==================
+// ================== Motors ==================
 AF_DCMotor motor1(1);
 AF_DCMotor motor2(2);
 AF_DCMotor motor3(3);
 AF_DCMotor motor4(4);
 
 // ================== Speed & Mode ==================
-int speedVal = 230;      // 0..255
+int speedVal = 230;
 char lastCmd = 'S';
 
 enum Mode { MODE_MANUAL = 0, MODE_AUTO = 1 };
 Mode mode = MODE_MANUAL;
+
+// ================== LED trạng thái ==================
+const int LED_PIN = LED_BUILTIN;   // chân 13 Arduino
+unsigned long lastBlink = 0;
+bool ledState = false;
+const unsigned long BLINK_INTERVAL = 300;  // AUTO nháy 300ms
 
 // ================== Helpers ==================
 void setAllSpeeds(int spd) {
@@ -62,7 +66,6 @@ void goBackward() {
 }
 
 void turnLeft() {
-  // quay trái tại chỗ (differential)
   motor1.run(BACKWARD);
   motor2.run(BACKWARD);
   motor3.run(FORWARD);
@@ -70,7 +73,6 @@ void turnLeft() {
 }
 
 void turnRight() {
-  // quay phải tại chỗ
   motor1.run(FORWARD);
   motor2.run(FORWARD);
   motor3.run(BACKWARD);
@@ -80,7 +82,7 @@ void turnRight() {
 int getDistance() {
   delay(40);
   int cm = sonar.ping_cm();
-  if (cm == 0) cm = 100; // không bắt echo => coi như xa
+  if (cm == 0) cm = 100;
   return cm;
 }
 
@@ -89,9 +91,8 @@ void report(const __FlashStringHelper* msg) {
   BT.println(msg);
 }
 
-// ================== AUTO MODE: line follow + stop at 5cm ==================
+// ================== AUTO MODE ==================
 void autoStep() {
-  // 1) Kiểm tra vật cản
   int d = getDistance();
   if (d <= STOP_DISTANCE) {
     stopAll();
@@ -100,73 +101,66 @@ void autoStep() {
     return;
   }
 
-  // 2) Đọc IR
   int L = digitalRead(IR_LEFT);
   int R = digitalRead(IR_RIGHT);
 
-  // Logic mặc định: ĐEN=0, TRẮNG=1
   if (L == 0 && R == 0) {
     goForward();
-    //Serial.println(F("[AUTO] Forward"));
   }
   else if (L == 0 && R == 1) {
     turnLeft();
-    //Serial.println(F("[AUTO] Adjust Left"));
   }
   else if (L == 1 && R == 0) {
     turnRight();
-    //Serial.println(F("[AUTO] Adjust Right"));
   }
-  else { // L==1 && R==1
+  else {
     stopAll();
-    //Serial.println(F("[AUTO] Stop (lost line)"));
   }
 }
 
-// ================== Command handling ==================
+// ================== Handle Commands ==================
 void handleCommand(char c) {
   if (c == '\n' || c == '\r') return;
   if (c >= 'a' && c <= 'z') c = c - 'a' + 'A';
 
-  // Phím số đổi tốc độ (áp dụng cho cả Manual & Auto)
+  // ===== Tốc độ =====
   if (c >= '0' && c <= '9') {
     int lvl = c - '0';
     int newSpeed = map(lvl, 0, 9, 80, 255);
     speedVal = newSpeed;
     setAllSpeeds(speedVal);
-    Serial.print(F("[SPD] ")); Serial.println(speedVal);
-    BT.print(F("[SPD] "));    BT.println(speedVal);
+    report(F("[SPD] Speed changed"));
     return;
   }
 
   switch (c) {
-    // ===== Chuyển chế độ =====
-    case 'A':
+    case 'K':   // AUTO mode
       mode = MODE_AUTO;
-      stopAll(); // an toàn trước khi vào AUTO
+      stopAll();
       report(F("[MODE] AUTO (Line + Stop@5cm)"));
+      ledState = true;
+      digitalWrite(LED_PIN, ledState);
+      lastBlink = millis();
       break;
 
-    case 'M':
+    case 'P':   // MANUAL mode
       mode = MODE_MANUAL;
       stopAll();
       report(F("[MODE] MANUAL (Bluetooth control)"));
+      digitalWrite(LED_PIN, HIGH);  // sáng liên tục
       break;
 
-    // ===== Lệnh chuyển động =====
     case 'F':
     case 'B':
     case 'L':
     case 'R':
       if (mode == MODE_MANUAL) {
-        lastCmd = c;
         if (c == 'F') { goForward(); report(F("Forward")); }
         else if (c == 'B') { goBackward(); report(F("Backward")); }
         else if (c == 'L') { turnLeft(); report(F("Left")); }
         else if (c == 'R') { turnRight(); report(F("Right")); }
       } else {
-        // Trong AUTO: bỏ qua lệnh di chuyển tay
-        report(F("[WARN] In AUTO mode. Use 'M' to switch to Manual."));
+        report(F("[WARN] In AUTO mode. Press P for MANUAL."));
       }
       break;
 
@@ -182,36 +176,44 @@ void handleCommand(char c) {
   }
 }
 
+// ================== Setup ==================
 void setup() {
   Serial.begin(9600);
   BT.begin(9600);
 
   pinMode(IR_LEFT, INPUT);
   pinMode(IR_RIGHT, INPUT);
+  pinMode(LED_PIN, OUTPUT);
 
   setAllSpeeds(speedVal);
   stopAll();
 
-  Serial.println(F("Ready. Commands:"));
-  Serial.println(F("  Manual: F,B,L,R,S and 0..9 for speed"));
-  Serial.println(F("  Modes : A=Auto (line+stop@5cm), M=Manual"));
-  BT.println(F("Ready (BT). F,B,L,R,S, 0..9 | A=Auto, M=Manual"));
+  digitalWrite(LED_PIN, HIGH); // default MANUAL: sáng
 }
 
+// ================== Loop ==================
 void loop() {
-  // Nhận lệnh từ Bluetooth
   if (BT.available()) {
-    char c = BT.read();
-    handleCommand(c);
+    handleCommand(BT.read());
   }
 
-  // (Tuỳ chọn) Nhận lệnh từ USB Serial để test
   if (Serial.available()) {
-    char c = Serial.read();
-    handleCommand(c);
+    handleCommand(Serial.read());
   }
 
-  // Nếu ở AUTO -> chạy tự động mỗi vòng loop
+  // LED trạng thái
+  if (mode == MODE_AUTO) {
+    unsigned long now = millis();
+    if (now - lastBlink >= BLINK_INTERVAL) {
+      lastBlink = now;
+      ledState = !ledState;
+      digitalWrite(LED_PIN, ledState);
+    }
+  } else {
+    digitalWrite(LED_PIN, HIGH);
+  }
+
+  // Auto chạy
   if (mode == MODE_AUTO) {
     autoStep();
   }
