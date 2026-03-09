@@ -1,41 +1,43 @@
 /*
-  Arduino UNO R3 + AFMotor v1 + Bluetooth HC-05 + IR line + HC-SR04 + 2 Servo
+  Arduino UNO R3 + Adafruit Motor Shield v1 + Bluetooth HC-05 (UART cứng D0/D1)
+  + IR line (A0/A1) + HC-SR04 (A2/A3) + 2 Servo (A4/A5)
+
   Điều khiển:
-    - W : Nâng (servo 360°)
-    - u : Hạ (servo 360°)
-    - N : Gắp (servo 180°)
-    - q : Thả (servo 180°)
+    - W : Nâng (servo 360° – A4)
+    - U : Hạ (servo 360° – A4)  (nhận cả 'u')
+    - N : Gắp (servo 180° – A5)
+    - Q : Thả (servo 180° – A5) (nhận cả 'q')
     - S : Dừng xe + dừng nâng/hạ
     - K : AUTO (dò line + stop @5cm)
     - P : MANUAL (Bluetooth)
     - F/B/L/R : Tiến/Lùi/Trái/Phải (MANUAL)
     - 0..9 : chỉnh tốc độ (80..255)
 
-  LƯU Ý Motor Shield v1:
-    - M1 dùng D11 (PWM) => sẽ xung đột nếu bạn dùng Bluetooth ở D11.
-    - Code này giữ SoftwareSerial BT(10,11) như code gốc của bạn.
-    - Nếu bạn dùng cổng M1, vui lòng đổi Bluetooth sang các chân khác (VD: RX=D2, TX=D9),
-      và đổi SERVO_LIFT_PIN sang A4 để tránh trùng.
+  LƯU Ý:
+    - Motor Shield v1 dùng rất nhiều chân:
+        PWM: D3 (M2), D5 (M3), D6 (M4), D11 (M1)
+        Dir: M1(D12,D13) M2(D4,D7) M3(D8,D9) M4(D2,D10)
+      => KHÔNG dùng các chân trên cho cảm biến/servo/Bluetooth.
+    - LED_BUILTIN (D13) bị M1 dùng => KHÔNG chớp LED trên D13.
+    - Bluetooth dùng D0/D1 (UART cứng). NHỚ rút TX/RX HC-05 khi Upload code.
 */
 
 #include <AFMotor.h>
-#include <SoftwareSerial.h>
 #include <NewPing.h>
 #include <Servo.h>
 
-// ================== Bluetooth (GIỮ như code gốc) ==================
-// HC-05 TXD -> D10 (RX của Arduino SoftwareSerial)
-// HC-05 RXD -> D11 (TX của Arduino SoftwareSerial) (NHỚ chia áp 5V->3.3V)
-SoftwareSerial BT(10, 11);
+// ================== Bluetooth qua UART cứng (D0/D1) ==================
+// Dùng chung Serial cho cả PC (USB) và HC-05. Tránh đọc/ghi 2 lần.
+#define BT Serial
 
 // ================== IR line sensors ==================
 #define IR_LEFT   A0
 #define IR_RIGHT  A1
 
 // ================== HC-SR04 ==================
-#define TRIGGER_PIN  A2
-#define ECHO_PIN     A3
-#define MAX_DISTANCE 50
+#define TRIGGER_PIN   A2
+#define ECHO_PIN      A3
+#define MAX_DISTANCE  50
 #define STOP_DISTANCE 5
 
 NewPing sonar(TRIGGER_PIN, ECHO_PIN, MAX_DISTANCE);
@@ -48,21 +50,20 @@ AF_DCMotor motor4(4);
 
 // ================== Speed & Mode ==================
 int speedVal = 230;
-char lastCmd = 'S';
-
 enum Mode { MODE_MANUAL = 0, MODE_AUTO = 1 };
 Mode mode = MODE_MANUAL;
 
 // ================== LED trạng thái ==================
-const int LED_PIN = LED_BUILTIN;   // chân 13 Arduino
+// KHÔNG dùng D13 (LED_BUILTIN) vì xung đột M1. Đặt -1 để vô hiệu.
+const int LED_PIN = -1;
 unsigned long lastBlink = 0;
 bool ledState = false;
 const unsigned long BLINK_INTERVAL = 300;  // AUTO nháy 300ms
 
 // ================== Servo (Nâng/Hạ + Gắp/Thả) ==================
-// Tránh Timer/xung đột: KHÔNG dùng D3/D5/D6/D11 cho servo (PWM motor), KHÔNG dùng D9/D10 nếu bạn cần servo header của shield
-const int SERVO_LIFT_PIN = 2;   // Servo 360° - nâng/hạ (continuous rotation)
-const int SERVO_GRIP_PIN = A5;  // Servo 180° - gắp/thả (A5 = digital 19)
+// Tránh mọi chân của shield: dùng A4 & A5 là an toàn.
+const int SERVO_LIFT_PIN = A4;  // Servo 360° - nâng/hạ (continuous rotation)
+const int SERVO_GRIP_PIN = A5;  // Servo 180° - gắp/thả
 
 Servo servoLift; // 360° nâng/hạ
 Servo servoGrip; // 180° gắp/thả
@@ -74,7 +75,7 @@ int PWM_DOWN = 1300;   // hạ  (chỉnh tùy servo: 1250..1350)
 
 // Thời gian “nhịp” cho nâng/hạ, sau đó tự dừng (ms)
 unsigned long LIFT_PULSE_MS = 250;
-// true: nhấn 1 lần chạy ~LIFT_PULSE_MS rồi tự dừng; false: chạy liên tục tới khi bấm S/W/u
+// true: nhấn 1 lần chạy ~LIFT_PULSE_MS rồi tự dừng; false: chạy liên tục tới khi bấm S/W/U
 bool pulseMode = true;
 
 // Góc servo 180° (điều chỉnh theo cơ cấu kẹp)
@@ -131,12 +132,12 @@ void turnRight() {
 int getDistance() {
   delay(40);
   int cm = sonar.ping_cm();
-  if (cm == 0) cm = 100;
+  if (cm == 0) cm = 100;  // khi không bắt được echo
   return cm;
 }
 
+// In ra cổng BT (Serial). Tránh in 2 lần.
 void report(const __FlashStringHelper* msg) {
-  Serial.println(msg);
   BT.println(msg);
 }
 
@@ -149,7 +150,7 @@ void startLiftUp() {
   servoLift.writeMicroseconds(PWM_UP);
   liftingActive = true;
   motionStart = millis();
-  if (!pulseMode) liftingActive = false; // nếu không dùng pulse, chạy liên tục tới khi bấm S/W/u
+  if (!pulseMode) liftingActive = false; // nếu không dùng pulse, chạy liên tục tới khi bấm S/W/U
 }
 
 void startLiftDown() {
@@ -174,7 +175,6 @@ void autoStep() {
   int d = getDistance();
   if (d <= STOP_DISTANCE) {
     stopAll();
-    Serial.print(F("[AUTO] STOP distance=")); Serial.print(d); Serial.println(F("cm"));
     BT.print(F("[AUTO] STOP distance=")); BT.print(d); BT.println(F("cm"));
     return;
   }
@@ -217,16 +217,18 @@ void handleCommand(char c) {
       mode = MODE_AUTO;
       stopAll();
       report(F("[MODE] AUTO (Line + Stop@5cm)"));
-      ledState = true;
-      digitalWrite(LED_PIN, ledState);
-      lastBlink = millis();
+      if (LED_PIN >= 0) {
+        ledState = true;
+        digitalWrite(LED_PIN, ledState);
+        lastBlink = millis();
+      }
       break;
 
     case 'P':   // MANUAL mode
       mode = MODE_MANUAL;
       stopAll();
       report(F("[MODE] MANUAL (Bluetooth control)"));
-      digitalWrite(LED_PIN, HIGH);  // sáng liên tục
+      if (LED_PIN >= 0) digitalWrite(LED_PIN, HIGH);  // sáng liên tục
       break;
 
     // ===== Điều khiển xe (MANUAL) =====
@@ -257,7 +259,7 @@ void handleCommand(char c) {
       report(F("[LIFT] UP"));
       break;
 
-    case 'U':   // Hạ (nhận cả 'u' do đã upper-case)
+    case 'U':   // Hạ
       startLiftDown();
       report(F("[LIFT] DOWN"));
       break;
@@ -267,7 +269,7 @@ void handleCommand(char c) {
       report(F("[GRIP] GRAB"));
       break;
 
-    case 'Q':   // Thả (nhận cả 'q')
+    case 'Q':   // Thả
       releaseObject();
       report(F("[GRIP] RELEASE"));
       break;
@@ -282,14 +284,14 @@ void handleCommand(char c) {
 
 // ================== Setup ==================
 void setup() {
-  Serial.begin(9600);
+  // UART cứng cho HC-05 & Serial Monitor
   BT.begin(9600);
 
   pinMode(IR_LEFT, INPUT);
   pinMode(IR_RIGHT, INPUT);
-  pinMode(LED_PIN, OUTPUT);
+  if (LED_PIN >= 0) pinMode(LED_PIN, OUTPUT);
 
-  // Servo attach
+  // Servo attach trên A4 & A5 (tránh xung đột shield)
   servoLift.attach(SERVO_LIFT_PIN);
   servoGrip.attach(SERVO_GRIP_PIN);
   stopLift();
@@ -298,33 +300,33 @@ void setup() {
   setAllSpeeds(speedVal);
   stopAll();
 
-  digitalWrite(LED_PIN, HIGH); // default MANUAL: sáng
+  if (LED_PIN >= 0) digitalWrite(LED_PIN, HIGH); // default MANUAL: sáng
 
-  // Gợi ý lệnh qua Serial
-  Serial.println(F("Ready: F/B/L/R, K(AUTO)/P(MANUAL), 0..9 speed"));
-  Serial.println(F("Lift/Grip: W(UP), u(DOWN), N(GRAB), q(RELEASE), S(STOP car+lift)"));
+  // Gợi ý lệnh qua BT/Serial
+  BT.println(F("Ready: F/B/L/R, K(AUTO)/P(MANUAL), 0..9 speed"));
+  BT.println(F("Lift/Grip: W(UP), U(DOWN), N(GRAB), Q(RELEASE), S(STOP car+lift)"));
+  BT.println(F("Note: Using HW Serial D0/D1 for HC-05. Unplug RX/TX when uploading."));
 }
 
 // ================== Loop ==================
 void loop() {
+  // Chỉ đọc từ BT (Serial). Tránh double-read.
   if (BT.available()) {
     handleCommand(BT.read());
   }
 
-  if (Serial.available()) {
-    handleCommand(Serial.read());
-  }
-
-  // LED trạng thái
-  if (mode == MODE_AUTO) {
-    unsigned long now = millis();
-    if (now - lastBlink >= BLINK_INTERVAL) {
-      lastBlink = now;
-      ledState = !ledState;
-      digitalWrite(LED_PIN, ledState);
+  // LED trạng thái (nếu có)
+  if (LED_PIN >= 0) {
+    if (mode == MODE_AUTO) {
+      unsigned long now = millis();
+      if (now - lastBlink >= BLINK_INTERVAL) {
+        lastBlink = now;
+        ledState = !ledState;
+        digitalWrite(LED_PIN, ledState);
+      }
+    } else {
+      digitalWrite(LED_PIN, HIGH);
     }
-  } else {
-    digitalWrite(LED_PIN, HIGH);
   }
 
   // Auto chạy
