@@ -1,25 +1,17 @@
 /*
-  Arduino UNO R3 + Adafruit Motor Shield v1 + Bluetooth HC-05 (UART cứng D0/D1)
-  + IR line (A0/A1) + HC-SR04 (A2/A3) + 2 Servo (D9/D10)
+  Arduino UNO R3 + Adafruit Motor Shield v1 + Bluetooth HC-05 (UART D0/D1)
+  + IR line (A0/A1) + HC-SR04 (A2/A3) + Servo (D9/D10)
 
   Điều khiển:
     - W : Nâng (servo 360° – D9)
-    - U : Hạ (servo 360° – D9)
+    - U : Hạ  (servo 360° – D9)
     - N : Gắp (servo 180° – D10)
     - Q : Thả (servo 180° – D10)
-    - S : Dừng xe + dừng nâng/hạ
-    - K : AUTO (dò line + stop @5cm)
-    - P : MANUAL (Bluetooth)
+    - S : Dừng xe
+    - C : AUTO (dò line + Stop @5cm)
+    - K : MANUAL (tắt AUTO)
     - F/B/L/R : Tiến/Lùi/Trái/Phải (MANUAL)
     - 0..9 : chỉnh tốc độ (80..255)
-
-  LƯU Ý:
-    - Motor Shield v1 chiếm rất nhiều chân:
-        PWM: D3 (M2), D5 (M3), D6 (M4), D11 (M1)
-        Dir: M1(D12,D13) M2(D4,D7) M3(D8,D9*) M4(D2,D10*)
-      (* Shield V1 chỉ chiếm D9/D10 nếu dùng SERVOS của Shield.
-         Ở đây ta không dùng header SERVO trên shield → D9/D10 FREE.)
-    - Bluetooth dùng D0/D1 → rút TX/RX khi Upload.
 */
 
 #include <AFMotor.h>
@@ -52,35 +44,28 @@ int speedVal = 230;
 enum Mode { MODE_MANUAL = 0, MODE_AUTO = 1 };
 Mode mode = MODE_MANUAL;
 
-// ================== LED trạng thái ==================
-const int LED_PIN = -1;
-unsigned long lastBlink = 0;
-bool ledState = false;
-const unsigned long BLINK_INTERVAL = 300;
-
 // ================== Servo ==================
-// CHUYỂN SANG D9 - D10
-const int SERVO_LIFT_PIN = 9;    // Servo 360° nâng/hạ
-const int SERVO_GRIP_PIN = 10;   // Servo 180° gắp/thả
+const int SERVO_LIFT_PIN = 9;  
+const int SERVO_GRIP_PIN = 10;
 
 Servo servoLift;
 Servo servoGrip;
 
-// Servo 360° xung microseconds
+// Servo 360° PWM
 int PWM_STOP = 1500;
 int PWM_UP   = 1700;
 int PWM_DOWN = 1300;
 
 unsigned long LIFT_PULSE_MS = 250;
 bool pulseMode = true;
-
-int ANGLE_GRAB     = 120;
-int ANGLE_RELEASE  = 60;
-
 bool liftingActive = false;
 unsigned long motionStart = 0;
 
-// ================== Helpers ==================
+// Servo 180°
+int ANGLE_GRAB     = 120;
+int ANGLE_RELEASE  = 60;
+
+// ================== Motor helpers ==================
 void setAllSpeeds(int spd) {
   motor1.setSpeed(spd);
   motor2.setSpeed(spd);
@@ -143,14 +128,12 @@ void startLiftUp() {
   servoLift.writeMicroseconds(PWM_UP);
   liftingActive = true;
   motionStart = millis();
-  if (!pulseMode) liftingActive = false;
 }
 
 void startLiftDown() {
   servoLift.writeMicroseconds(PWM_DOWN);
   liftingActive = true;
   motionStart = millis();
-  if (!pulseMode) liftingActive = false;
 }
 
 void grab() {
@@ -168,7 +151,9 @@ void autoStep() {
   int d = getDistance();
   if (d <= STOP_DISTANCE) {
     stopAll();
-    BT.print(F("[AUTO] STOP distance=")); BT.print(d); BT.println(F("cm"));
+    BT.print(F("[AUTO] STOP distance="));
+    BT.print(d);
+    BT.println(F("cm"));
     return;
   }
 
@@ -188,26 +173,28 @@ void handleCommand(char c) {
 
   if (c >= '0' && c <= '9') {
     int lvl = c - '0';
-    int newSpeed = map(lvl, 0, 9, 80, 255);
-    speedVal = newSpeed;
+    speedVal = map(lvl, 0, 9, 80, 255);
     setAllSpeeds(speedVal);
     report(F("[SPD] Speed changed"));
     return;
   }
 
   switch (c) {
-    case 'K':
+
+    // ---------- ĐÃ SỬA LỆNH ----------
+    case 'C':   // Bật AUTO
       mode = MODE_AUTO;
       stopAll();
       report(F("[MODE] AUTO"));
       break;
 
-    case 'P':
+    case 'K':   // Tắt AUTO
       mode = MODE_MANUAL;
       stopAll();
       report(F("[MODE] MANUAL"));
       break;
 
+    // Manual drive
     case 'F':
     case 'B':
     case 'L':
@@ -217,7 +204,9 @@ void handleCommand(char c) {
         else if (c == 'B') { goBackward(); report(F("Backward")); }
         else if (c == 'L') { turnLeft(); report(F("Left")); }
         else if (c == 'R') { turnRight(); report(F("Right")); }
-      } else report(F("[WARN] AUTO mode! Press P."));
+      } else {
+        report(F("[WARN] Đang AUTO → Nhấn K để thoát"));
+      }
       break;
 
     case 'S':
@@ -270,9 +259,8 @@ void setup() {
   setAllSpeeds(speedVal);
   stopAll();
 
-  BT.println(F("Ready: F/B/L/R, K/P, 0..9 speed"));
+  BT.println(F("Ready: F/B/L/R | C=AUTO | K=MANUAL | 0..9 speed"));
   BT.println(F("Lift: W=UP, U=DOWN | Grip: N=GRAB, Q=RELEASE"));
-  BT.println(F("Using HW Serial D0/D1 → unplug HC-05 when uploading."));
 }
 
 // ================== Loop ==================
